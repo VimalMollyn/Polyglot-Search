@@ -48,5 +48,22 @@
 |---|------|---------|-------------|
 | 1 | 2026-02-25 | Use Gemini 3 Flash Preview instead of Gemini 2.0 Flash | Updated model ID in both Gemini API calls in `app.py` from `gemini-2.0-flash` to `gemini-3-flash-preview` |
 | 2 | 2026-02-25 | Log all change requests in `questions.md` going forward; update `CLAUDE.md` to enforce this | Added this Change Requests table to `questions.md`; added logging instruction to `CLAUDE.md` |
-| 3 | 2026-02-25 | Deduplicate results pointing to the same page across languages (e.g., Apple developer site shown 5 times) | Added `_normalize_url()` to strip www/trailing slashes for URL matching. Replaced round-robin interleaving with dedup+merge: same URL across languages becomes one card showing all language flags. |
-| 4 | 2026-02-25 | Rank results by cross-language frequency — links found in more languages get higher priority, show all flags, prefer English version | Results sorted by `lang_count` descending. English version preferred for title/link when available. Result card shows multiple badges + "Found in N languages" note. Summary shows count of multi-language results. |
+| 3 | 2026-02-25 | Deduplicate results that point to the same URL across languages (e.g. Apple dev site showing 5 times) | Added Step 6 in `search_all()`: after interleaving, deduplicate by normalized URL, keeping only the first occurrence |
+| 4 | 2026-02-25 | Allow selecting specific languages to search in | Added toggleable language badges in the hero; selected languages passed to search via hidden form field; `search_all()` now accepts a `lang_codes` parameter |
+| 5 | 2026-02-25 | AI-suggest best languages based on query; show "Searching in X, Y, Z..." breathing animation | Added `suggest_languages()` Gemini call; two-phase HTMX flow: `/search` returns breathing indicator + auto-triggers `/execute-search`; CSS `@keyframes breathe` animation |
+| 6 | 2026-02-25 | Add "Max Polyglot" mode that searches all available languages | Added Max Polyglot toggle button; when active, bypasses AI suggestion and sends all 6 languages |
+| 7 | 2026-02-25 | Remove the empty state text/icon below the search bar | Removed the "Search the world's internet" empty state div from `search_page()` |
+| 8 | 2026-02-25 | Language buttons don't look clickable — make it more obvious | Improved lang-toggle styling: added hover cursor/scale, dashed border, press feedback |
+| 9 | 2026-02-25 | Move Max Polyglot next to Search button, make it a different color | Moved polyglot btn into search-row (next to Search); restyled as purple (#a74fed) to distinguish from yellow Search btn |
+| 10 | 2026-02-25 | Remove "Select languages or let AI choose..." hint text | Removed hint paragraph from the form |
+| 11 | 2026-02-25 | Remove blue background, remove globe emoji from title and Max Polyglot button | Hero bg changed to #f8f9fa (matches body); removed 🌐 from h1 and polyglot btn; updated lang-toggle and polyglot-btn colors for light bg |
+| 12 | 2026-02-25 | Make search box look like Google's pill-shaped search bar | Restyled search-row as a single pill container with thin border, hover shadow; input is transparent inside; Search/Polyglot btns sit inside the pill |
+| 13 | 2026-02-25 | Move all search elements to the vertical middle of the screen | Hero uses `min-height:60vh` with flexbox centering to push content to screen center |
+| 14 | 2026-02-25 | Title should be just "Polyglot" with each letter a different color like Google logo | Replaced H1 with per-letter Spans using Google's color palette: blue, red, yellow, blue, green, red, yellow, blue |
+| 15 | 2026-02-25 | Choose a different font for the title | Added Google Fonts Poppins (600 weight); title now uses Poppins at 64px for a clean logo feel |
+| 16 | 2026-02-25 | Remove subtitle text below title | Removed "Search once. Get results from multiple Googles." subtitle |
+| 17 | 2026-02-25 | Remove placeholder text from search input | Cleared "Search the world's internet..." placeholder |
+| 18 | 2026-02-25 | Fix ugly blue autofill highlight on search input when selecting from browser history | Added `-webkit-autofill` CSS overrides to force white background on autofilled input |
+| 19 | 2026-02-25 | Hero should move to top-left after search (like Google); remove white gap between hero and results | Added `.hero.compact` CSS class: collapses to top bar with row layout, smaller title, left-aligned; JS adds `compact` class on form submit |
+| 20 | 2026-02-25 | Show "Obtaining languages to search in" status when Gemini is suggesting languages | Added 3-phase HTMX flow: `/search` returns instant "Obtaining best languages..." indicator → `/suggest-and-search` calls Gemini → `/execute-search` returns results |
+| 21 | 2026-02-25 | Collapse language options in compact mode (behind a dropdown) | In compact mode, `.lang-selector` is hidden; a "\u2699 Languages" button appears in the search row with a dropdown panel; main and dropdown toggles stay synced |
