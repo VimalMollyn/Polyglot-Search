@@ -24,6 +24,9 @@ LANG_ORDER = ["en", "ja", "de", "fr", "zh", "ko"]
 
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key={GEMINI_API_KEY}"
 
+# In-memory search cache: (query_lower, frozenset(lang_codes)) -> results list
+_search_cache: dict[tuple[str, frozenset[str]], list[dict]] = {}
+
 # ─── Gemini helpers ───────────────────────────────────────────────────────────
 
 async def _gemini_json(client: httpx.AsyncClient, prompt: str, timeout: int = 20) -> dict | list | None:
@@ -120,6 +123,43 @@ async def translate_results_to_english(client: httpx.AsyncClient, results: list[
     return out
 
 
+async def rerank_results(client: httpx.AsyncClient, query: str, results: list[dict]) -> list[dict]:
+    """Ask Gemini to rerank results by relevance + uniqueness (non-English content prioritized)."""
+    if len(results) <= 1:
+        return results
+
+    items = []
+    for i, r in enumerate(results):
+        title = (r.get("title_en") or r.get("title", ""))[:100]
+        snippet = (r.get("snippet_en") or r.get("snippet", ""))[:80]
+        items.append({"i": i, "title": title, "snippet": snippet, "lang": r.get("lang_code", "en"), "domain": r.get("domain", "")})
+
+    prompt = (
+        f'Rerank these search results for the query: "{query}"\n'
+        f"Prioritize:\n"
+        f"1) Relevance to the query\n"
+        f"2) Unique content not typically found in English Google — non-English results with unique perspectives should rank higher\n"
+        f"Return ONLY a JSON array of the index numbers in optimal order, e.g. [3, 0, 5, 1, ...]\n"
+        f"Results:\n{json.dumps(items, ensure_ascii=False)}"
+    )
+    result = await _gemini_json(client, prompt, timeout=15)
+
+    if isinstance(result, list):
+        try:
+            indices = [int(x) for x in result if isinstance(x, (int, float)) and 0 <= int(x) < len(results)]
+            # Add any missing indices at the end
+            seen = set(indices)
+            for i in range(len(results)):
+                if i not in seen:
+                    indices.append(i)
+            return [results[i] for i in indices]
+        except (ValueError, IndexError):
+            pass
+
+    print("[rerank_results] fallback: returning original order")
+    return results
+
+
 # ─── Search ───────────────────────────────────────────────────────────────────
 
 async def search_language(client: httpx.AsyncClient, query: str, lang_code: str) -> list[dict]:
@@ -160,6 +200,11 @@ async def search_language(client: httpx.AsyncClient, query: str, lang_code: str)
 # ─── Aggregation ──────────────────────────────────────────────────────────────
 
 async def search_all(query: str, lang_codes: list[str]) -> list[dict]:
+    cache_key = (query.lower().strip(), frozenset(lang_codes))
+    if cache_key in _search_cache:
+        print(f"[search_all] cache hit for {cache_key}")
+        return _search_cache[cache_key]
+
     async with httpx.AsyncClient() as client:
         # Step 1: Translate query into non-English selected languages
         translations = await translate_query_batch(client, query, lang_codes)
@@ -200,6 +245,10 @@ async def search_all(query: str, lang_codes: list[str]) -> list[dict]:
                 seen_urls.add(url)
                 deduped.append(item)
 
+        # Step 7: Rerank with Gemini (relevance + uniqueness)
+        deduped = await rerank_results(client, query, deduped)
+
+        _search_cache[cache_key] = deduped
         return deduped
 
 
@@ -317,7 +366,10 @@ def search_page():
                 }
                 .hero h1 { font-family: 'Poppins', sans-serif; font-size: 64px; font-weight: 600; margin: 0 0 6px 0; letter-spacing: -1px; transition: font-size 0.3s ease; }
                 .hero.compact h1 { font-size: 28px; margin: 0; cursor: pointer; }
-                .hero.compact .search-row { max-width: 480px; flex: 1; }
+                .hero.compact form { flex: 1; min-width: 0; }
+                .hero.compact .search-row { max-width: 640px; flex: 1; margin: 0; }
+                .hero.compact .search-btn { padding: 8px 14px; font-size: 13px; }
+                .hero.compact .polyglot-btn { padding: 8px 12px; font-size: 12px; }
                 .hero.compact .lang-selector { display: none; }
                 .lang-toggle-btn {
                     display: none; align-items: center; gap: 4px;
@@ -331,21 +383,26 @@ def search_page():
                     display: none; position: absolute; top: 100%; right: 0; margin-top: 6px;
                     background: #fff; border: 1px solid #dadce0; border-radius: 12px;
                     padding: 10px; box-shadow: 0 4px 16px rgba(0,0,0,0.12);
-                    z-index: 100; gap: 6px; flex-wrap: wrap; min-width: 280px;
+                    z-index: 100; gap: 6px; flex-wrap: wrap; width: 240px;
                 }
                 .lang-dropdown.open { display: flex; }
+                .lang-dropdown .lang-toggle {
+                    border-style: solid; border-color: #dadce0; font-size: 12px;
+                    padding: 5px 10px;
+                }
 
                 /* Search bar — Google-style pill */
                 .search-row {
-                    display: flex; align-items: center; max-width: 640px; margin: 0 auto;
+                    display: flex; align-items: center; max-width: 640px; width: 100%; margin: 0 auto;
                     background: #fff; border: 1px solid #dfe1e5; border-radius: 24px;
-                    padding: 6px 6px 6px 20px; gap: 8px;
+                    padding: 6px 6px 6px 20px; gap: 6px;
                     box-shadow: none; transition: box-shadow 0.2s, border-color 0.2s;
+                    flex-shrink: 0;
                 }
                 .search-row:hover { box-shadow: 0 1px 6px rgba(32,33,36,0.18); border-color: rgba(223,225,229,0); }
                 .search-row:focus-within { box-shadow: 0 1px 6px rgba(32,33,36,0.18); border-color: rgba(223,225,229,0); }
                 .search-input {
-                    flex: 1; padding: 8px 0; font-size: 16px;
+                    flex: 1; min-width: 0; padding: 8px 0; font-size: 16px;
                     border: none; outline: none; background: transparent; color: #202124;
                 }
                 .search-input::placeholder { color: #9aa0a6; }
