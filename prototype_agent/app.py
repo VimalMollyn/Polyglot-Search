@@ -199,12 +199,8 @@ async def search_language(client: httpx.AsyncClient, query: str, lang_code: str)
 
 # ─── Aggregation ──────────────────────────────────────────────────────────────
 
-async def search_all(query: str, lang_codes: list[str]) -> list[dict]:
-    cache_key = (query.lower().strip(), frozenset(lang_codes))
-    if cache_key in _search_cache:
-        print(f"[search_all] cache hit for {cache_key}")
-        return _search_cache[cache_key]
-
+async def search_phase1(query: str, lang_codes: list[str]) -> list[dict]:
+    """Translate query + fire all searches. Returns raw (untranslated) flat results."""
     async with httpx.AsyncClient() as client:
         # Step 1: Translate query into non-English selected languages
         translations = await translate_query_batch(client, query, lang_codes)
@@ -212,17 +208,21 @@ async def search_all(query: str, lang_codes: list[str]) -> list[dict]:
         for lc in lang_codes:
             if lc != "en":
                 queries[lc] = translations.get(lc, query)
-        print(f"[search_all] translated queries: {queries}")
+        print(f"[search_phase1] translated queries: {queries}")
 
         # Step 2: Fire all searches in parallel
         search_tasks = [search_language(client, queries[lc], lc) for lc in lang_codes]
         all_results_by_lang = await asyncio.gather(*search_tasks)
 
         # Step 3: Flatten
-        flat = [item for lang_results in all_results_by_lang for item in lang_results]
+        return [item for lang_results in all_results_by_lang for item in lang_results]
 
+
+async def search_phase2(query: str, raw_results: list[dict], lang_codes: list[str]) -> list[dict]:
+    """Translate results back to English, interleave, dedup, rerank."""
+    async with httpx.AsyncClient() as client:
         # Step 4: Batch-translate non-English titles/snippets back to English
-        flat = await translate_results_to_english(client, flat)
+        flat = await translate_results_to_english(client, raw_results)
 
         # Step 5: Interleave round-robin across languages
         per_lang = {lc: [] for lc in lang_codes}
@@ -248,8 +248,12 @@ async def search_all(query: str, lang_codes: list[str]) -> list[dict]:
         # Step 7: Rerank with Gemini (relevance + uniqueness)
         deduped = await rerank_results(client, query, deduped)
 
-        _search_cache[cache_key] = deduped
         return deduped
+
+
+# In-memory store for passing raw results between phases
+import uuid
+_pending_results: dict[str, tuple[str, list[dict], list[str]]] = {}
 
 
 # ─── UI Components ────────────────────────────────────────────────────────────
@@ -518,17 +522,25 @@ def search_page():
                         dd.classList.remove('open');
                     }
                 });
-                function gatherFormData() {
-                    // Use main toggles (or dropdown — they're synced) to collect selected
+                function gatherFormData(evt) {
+                    // Inject selected languages directly into HTMX request parameters
                     var selected = new Set();
                     document.querySelectorAll('.lang-toggle.selected').forEach(function(el) {
                         selected.add(el.dataset.lang);
                     });
-                    document.getElementById('selected-langs').value = Array.from(selected).join(',');
                     var pg = document.getElementById('polyglot-btn');
-                    document.getElementById('polyglot-flag').value = pg && pg.classList.contains('active') ? '1' : '0';
+                    var isPolyglot = pg && pg.classList.contains('active') ? '1' : '0';
+
+                    if (evt && evt.detail && evt.detail.parameters) {
+                        evt.detail.parameters['langs'] = Array.from(selected).join(',');
+                        evt.detail.parameters['polyglot'] = isPolyglot;
+                    }
+
+                    // Also update hidden fields as fallback
+                    document.getElementById('selected-langs').value = Array.from(selected).join(',');
+                    document.getElementById('polyglot-flag').value = isPolyglot;
+
                     document.querySelector('.hero').classList.add('compact');
-                    // Close dropdown if open
                     var dd = document.getElementById('lang-dropdown');
                     if (dd) dd.classList.remove('open');
                 }
@@ -599,8 +611,8 @@ def search_page():
                     hx_post="/search",
                     hx_target="#results",
                     hx_swap="innerHTML",
-                    # Gather toggle state right before HTMX sends the request
-                    **{"hx-on::before-request": "gatherFormData()"},
+                    # Gather toggle state before HTMX serializes form values
+                    **{"hx-on:htmx:config-request": "gatherFormData(event)"},
                 ),
                 cls="hero",
             ),
@@ -691,13 +703,46 @@ async def post(query: str):
 
 @rt("/execute-search")
 async def post(query: str, langs: str):
-    """Phase 2: Actually perform the searches and return results."""
+    """Phase 2: Search all languages, then show 'Translating...' + auto-trigger phase 3."""
     lang_codes = [lc for lc in langs.split(",") if lc in LANGUAGES]
     if not lang_codes:
         lang_codes = ["en"]
 
-    results = await search_all(query.strip(), lang_codes)
-    return results_fragment(results, query.strip())
+    raw_results = await search_phase1(query.strip(), lang_codes)
+
+    # Store raw results for phase 3
+    job_id = str(uuid.uuid4())
+    _pending_results[job_id] = (query.strip(), raw_results, lang_codes)
+
+    non_en_count = sum(1 for r in raw_results if r.get("lang_code") != "en")
+    status_text = "Translating and ranking results..." if non_en_count > 0 else "Ranking results..."
+
+    return Div(
+        Div(
+            Div(cls="spinner-ring"),
+            P(status_text, cls="breathing-text"),
+            style="text-align:center; padding:50px 0;",
+        ),
+        Div(
+            hx_post="/translate-and-rank",
+            hx_vals=json.dumps({"job_id": job_id}),
+            hx_trigger="load",
+            hx_target="#results",
+            hx_swap="innerHTML",
+        ),
+    )
+
+
+@rt("/translate-and-rank")
+async def post(job_id: str):
+    """Phase 3: Translate results to English, rerank, return final HTML."""
+    job = _pending_results.pop(job_id, None)
+    if not job:
+        return Div(P("Session expired. Please search again.", style="text-align:center; color:#5f6368; padding:40px 0;"))
+
+    query, raw_results, lang_codes = job
+    results = await search_phase2(query, raw_results, lang_codes)
+    return results_fragment(results, query)
 
 
 serve(port=5001)
